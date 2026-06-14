@@ -17,17 +17,20 @@ module.exports = function ({ api, models, Users, Threads, Currencies }) {
       const matched    = Array.isArray(eventTypes) && eventTypes.includes(event.logMessageType);
       const hasBelal   = typeof value.handleEvent === "function";
       if (!matched && !hasBelal) continue;
-      try {
+      // ── Isolated async execution — একটা event crash হলে বাকিগুলো চলবে ──
+      Promise.resolve().then(async () => {
         const Obj = { api, event, models, Users, Threads, Currencies };
         if (matched && typeof value.run === "function") {
-          value.run(Obj);
-          if (DeveloperMode) global.log?.event?.(`[Event] ${value.config.name} | ${threadID}`);
+          await value.run(Obj);
+          if (DeveloperMode) global.log?.info?.(`[Event] ${value.config.name} | ${threadID}`);
         } else if (hasBelal) {
-          value.handleEvent(Obj);
+          await value.handleEvent(Obj);
         }
-      } catch (e) {
-        global.log?.error?.(`[handleEvent] ${value.config?.name}: ${e.message}`);
-      }
+      }).catch(e => {
+        const msg = e?.message || String(e);
+        const isNet = ["ECONNRESET","ETIMEDOUT","network","axios"].some(k => msg.includes(k));
+        if (!isNet) global.log?.warn?.(`⚠️ [Event:${value.config?.name}]: ${msg.slice(0,80)}`);
+      });
     }
   };
 };

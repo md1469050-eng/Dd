@@ -300,17 +300,39 @@ module.exports = function ({ api, models, Users, Threads, Currencies }) {
 
       const runner = command.run || command.onStart || command.onCall;
       if (!runner) throw new Error(`কমান্ড [${command.config.name}] এ run/onStart/onCall নেই`);
-      await runner(Obj);
-      timestamps.set(senderID, dateNow);
 
+      // ── Timeout wrapper — command ৬০ সেকেন্ডে শেষ না হলে kill ──
+      await Promise.race([
+        runner(Obj),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Command timeout (60s)")), 60000)
+        ),
+      ]);
+
+      timestamps.set(senderID, dateNow);
       if (DeveloperMode)
         global.log?.info?.(`[DEV] ${commandName} | ${senderID} | ${Date.now() - dateNow}ms`);
+
     } catch (e) {
-      global.log?.error?.(`❌ [${command.config.name}] ত্রুটি: ${e.message}`);
-      api.sendMessage(
-        `❌ "${commandName}" কমান্ড চালাতে সমস্যা হয়েছে!\n📝 ত্রুটি: ${e.message?.slice(0, 150)}\n🔧 Admin কে জানাও।`,
-        threadID
-      );
+      const msg   = e?.message || String(e);
+      const isNet = ["ECONNRESET","ETIMEDOUT","ENOTFOUND","network","fetch","axios","socket"].some(k => msg.includes(k));
+      const isTmr = msg.includes("timeout");
+
+      global.log?.warn?.(`⚠️ [${command?.config?.name || commandName}]: ${msg.slice(0, 100)}`);
+
+      // Network error — user কে বলো retry করতে
+      if (isNet) {
+        api.sendMessage(`⚠️ "${commandName}" — নেটওয়ার্ক সমস্যা! কিছুক্ষণ পরে আবার চেষ্টা করো। 🔄`, threadID);
+      } else if (isTmr) {
+        api.sendMessage(`⏱️ "${commandName}" — সময় শেষ! আবার চেষ্টা করো।`, threadID);
+      } else {
+        api.sendMessage(
+          `❌ "${commandName}" কমান্ড চালাতে সমস্যা!
+📝 ${msg.slice(0, 100)}
+🔄 আবার চেষ্টা করো।`,
+          threadID
+        );
+      }
     }
   };
 };
