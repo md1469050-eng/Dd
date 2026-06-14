@@ -432,45 +432,120 @@ function loadLanguage() {
 }
 
 // ═══════════════════════════════════════════════════
-// STEP 11: Command loader
-// Supports: run() [BELAL], onStart() [GoatBot], onCall() [legacy]
-// Auto-install dependencies, run onLoad(), register handleEvent
-// ═══════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════
+// STEP 11: Ultimate Command Loader
+// ✅ 1000+ command support  ✅ Auto module alias
+// ✅ Auto-install deps      ✅ Hot-patch apiHelper path
+// ✅ Alias support          ✅ Error isolation
+// ════════════════════════════════════════════════════════════════════
+
+// ── Pre-register apiHelper under ALL possible paths commands might use ──
+(function preRegisterApiHelper() {
+  try {
+    const helperPath     = path.join(ROOT, "utils", "apiHelper");
+    const helperResolved = require.resolve(helperPath);
+    const helperModule   = require(helperPath);
+    global._apiHelper    = helperModule;
+    global.apiHelper     = helperModule;
+
+    // Register under every path a command might try
+    const fakePaths = [
+      path.join(ROOT, "Script", "commands", "..", "..", "utils", "apiHelper"),
+      path.join(ROOT, "Script", "utils", "apiHelper"),
+      path.join(ROOT, "utils", "apiHelper"),
+    ];
+    for (const fp of fakePaths) {
+      try {
+        const r = require.resolve(fp);
+        if (!require.cache[r]) require.cache[r] = require.cache[helperResolved];
+      } catch {
+        // Create fake resolved path
+        try { require.cache[fp + ".js"] = require.cache[helperResolved]; } catch {}
+      }
+    }
+    log.success("✅ apiHelper pre-registered — 1000+ command ready");
+  } catch(e) { log.warn("apiHelper pre-cache: " + e.message); }
+})();
+
 function loadCommands() {
   const dir = path.join(ROOT, "Script", "commands");
-  if (!fs.existsSync(dir)) return log.warn("Script/commands/ ফোল্ডার পাওয়া যায়নি! কমান্ড ফাইলগুলো এখানে রাখো।");
+  if (!fs.existsSync(dir)) {
+    log.warn("Script/commands/ নেই — তৈরি করছি...");
+    fs.mkdirSync(dir, { recursive: true });
+    return;
+  }
+
   const disabled = new Set(global.config.commandDisabled || []);
-  const files = fs.readdirSync(dir).filter(
-    f => f.endsWith(".js") && !f.startsWith("_") && !disabled.has(f.replace(".js", ""))
+  const files    = fs.readdirSync(dir).filter(
+    f => f.endsWith(".js") && !f.startsWith("_") && !disabled.has(f.replace(".js",""))
   );
-  let ok = 0, fail = 0;
+
+  // ── apiHelper সব possible path এ register করো ──
+  const helperSrc = path.join(ROOT, "utils", "apiHelper");
+  try {
+    const helperMod = require(helperSrc);
+    const helperKey = require.resolve(helperSrc);
+    // Script/commands/x.js থেকে ../../utils/apiHelper → ROOT/utils/apiHelper
+    const fakeDirs  = [
+      path.join(ROOT, "Script", "commands"),
+      path.join(ROOT, "Script"),
+    ];
+    for (const d of fakeDirs) {
+      const fake = path.resolve(d, "../../utils/apiHelper");
+      if (!require.cache[fake]) require.cache[fake] = require.cache[helperKey];
+      if (!require.cache[fake+".js"]) require.cache[fake+".js"] = require.cache[helperKey];
+    }
+  } catch {}
+
+  let ok = 0, fail = 0, aliases = 0;
+
   for (const file of files) {
     const fp = path.join(dir, file);
     try {
+      // ── apiHelper path fix per-file ──
+      try {
+        const helperKey = require.resolve(helperSrc);
+        const fakeKey   = require.resolve(path.join(path.dirname(fp), "../../utils/apiHelper")).catch ? null :
+          (() => { try { return require.resolve(path.join(path.dirname(fp), "../../utils/apiHelper")); } catch { return null; } })();
+        if (fakeKey && !require.cache[fakeKey]) require.cache[fakeKey] = require.cache[helperKey];
+      } catch {}
+
       delete require.cache[require.resolve(fp)];
       const cmd = require(fp);
+
       if (!cmd?.config?.name) { fail++; continue; }
-      if (!cmd.run && !cmd.onStart && !cmd.onCall) { fail++; continue; }
+      if (!cmd.run && !cmd.onStart && !cmd.onCall && !cmd.handleEvent && !cmd.onEvent) { fail++; continue; }
       if (global.client.commands.has(cmd.config.name)) continue;
 
-      // Auto-install deps
-      if (cmd.config?.dependencies)
-        for (const [pkg, ver] of Object.entries(cmd.config.dependencies))
-          try { require(pkg); } catch { autoInstall(pkg, ver); }
+      // ── Auto-install missing packages ──
+      if (cmd.config?.dependencies) {
+        for (const [pkg] of Object.entries(cmd.config.dependencies)) {
+          try { require(pkg); } catch { autoInstall(pkg, ""); }
+        }
+      }
 
-      // handleEvent registration
-      if (cmd.handleEvent && !global.client.eventRegistered.includes(cmd.config.name))
+      // ── Register handleEvent + noPrefix ──
+      if ((cmd.handleEvent || cmd.onEvent) && !global.client.eventRegistered.includes(cmd.config.name))
         global.client.eventRegistered.push(cmd.config.name);
-
-      // noPrefix commands (AI triggers etc.)
       if (cmd.config?.noPrefix === true && !global.client.eventRegistered.includes(cmd.config.name))
         global.client.eventRegistered.push(cmd.config.name);
 
+      // ── Register command + aliases ──
       global.client.commands.set(cmd.config.name, cmd);
+      if (Array.isArray(cmd.config.aliases)) {
+        for (const alias of cmd.config.aliases) {
+          if (!global.client.commands.has(alias)) {
+            global.client.commands.set(alias, cmd);
+            aliases++;
+          }
+        }
+      }
 
-      // Run onLoad async (image/file pre-cache)
+      // ── onLoad async — no await, isolated ──
       if (typeof cmd.onLoad === "function")
-        Promise.resolve(cmd.onLoad()).catch(e => log.warn(`[${cmd.config.name}] onLoad ত্রুটি: ${e.message}`));
+        Promise.resolve().then(() => cmd.onLoad({ api: global._tempApi })).catch(e =>
+          log.warn(`[${cmd.config.name}] onLoad: ${e.message}`)
+        );
 
       ok++;
     } catch (e) {
@@ -478,7 +553,8 @@ function loadCommands() {
       fail++;
     }
   }
-  log.success(`কমান্ড লোড → ✅ ${ok} সফল | ❌ ${fail} ব্যর্থ`);
+
+  log.success(`কমান্ড → ✅ ${ok} সফল | 🔗 ${aliases} alias | ❌ ${fail} ব্যর্থ`);
   global.client._loadFail = (global.client._loadFail || 0) + fail;
 }
 
@@ -844,16 +920,66 @@ async function startBot(models) {
           };
         })();
 
-        // apiHelper global expose — commands সরাসরি ব্যবহার করতে পারবে
+        // ── apiHelper global expose (all access methods) ──
         const _helper = require("./utils/apiHelper");
-        global.apiHelper = _helper;
+        global.apiHelper     = _helper;
+        global._apiHelper    = _helper;
+        global.safeGet       = _helper.safeGet;
+        global.safePost      = _helper.safePost;
+        global.downloadToTmp = _helper.downloadToTmp;
+        global.cleanTmp      = _helper.cleanTmp;
+        global.getBaseApi    = _helper.getBaseApi;
+        global.fetchTikTok   = _helper.fetchTikTok;
+        global.uploadFile    = _helper.uploadFile;
+        global.getUA         = _helper.getUA;
 
-        log.success("✅ Axios ANTI-BLOCK চালু — UA rotation ✅ retry ✅ key rotation ✅");
+        // ── Re-register apiHelper under ALL paths (1000+ command support) ──
+        const helperKey = require.resolve("./utils/apiHelper");
+        const allFakes  = [
+          require("path").join(ROOT,"Script","commands","..","..","utils","apiHelper"),
+          require("path").join(ROOT,"Script","utils","apiHelper"),
+        ];
+        for (const f of allFakes) {
+          try {
+            const fr = require.resolve(f); if (!require.cache[fr]) require.cache[fr] = require.cache[helperKey];
+          } catch { require.cache[f] = require.cache[helperKey]; require.cache[f+".js"] = require.cache[helperKey]; }
+        }
+
+        log.success("✅ ULTIMATE SYSTEM চালু — UA rotation ✅ retry ✅ key rotation ✅ 1000+ command ready ✅");
       } catch (e) { log.warn("axios config সমস্যা: " + e.message); }
 
       await loadDBData(Threads, Users, Currencies);
       startHotReloader();
       setupExpress();
+
+      // ── Anti-Spam System ───────────────────────────────────────
+      const _spamMap = new Map();
+      global.checkAntiSpam = (senderID) => {
+        const now  = Date.now();
+        const data = _spamMap.get(senderID) || { count: 0, first: now };
+        if (now - data.first > 5000) { _spamMap.set(senderID, { count: 1, first: now }); return false; }
+        data.count++;
+        _spamMap.set(senderID, data);
+        if (data.count > 8) { // 5 সেকেন্ডে ৮টার বেশি → spam
+          if (data.count === 9) log.warn(`⚠️ Spam detected: ${senderID}`);
+          return true;
+        }
+        return false;
+      };
+      // spam map প্রতি ৩০ সেকেন্ডে clean
+      setInterval(() => {
+        const now = Date.now();
+        for (const [id, d] of _spamMap) { if (now - d.first > 30000) _spamMap.delete(id); }
+      }, 30000);
+
+      // ── Message Queue (concurrent limit) ──────────────────────
+      let _activeMessages = 0;
+      const MAX_CONCURRENT = 15;
+      global.messageQueue = async (fn) => {
+        while (_activeMessages >= MAX_CONCURRENT) await new Promise(r => setTimeout(r, 100));
+        _activeMessages++;
+        try { return await fn(); } finally { _activeMessages--; }
+      };
 
       // Load handlers
       const hCtx = { api, models, Users, Threads, Currencies };
@@ -996,16 +1122,70 @@ async function main() {
   if (!fs.existsSync(dataJsonPath))
     fs.writeFileSync(dataJsonPath, JSON.stringify({ adminbox: {} }, null, 2));
 
-  process.on("unhandledRejection", r => {
-    log.error(`অপ্রত্যাশিত ত্রুটি ধরা পড়েছে (rejection):`);
-    log.error(String(r).slice(0, 200));
-    saveCrashLog("rejection", r);
+  // ── Ultimate Error Handlers — bot কখনো crash হবে না ──────────
+  const IGNORE_ERRORS = [
+    "ECONNRESET","ECONNREFUSED","ETIMEDOUT","ENOTFOUND",
+    "socket hang up","network","connect EREFUSED",
+    "read ECONNRESET","write ECONNRESET","EPIPE",
+    "Cannot read properties of undefined",
+    "Cannot read property",
+    "of null","of undefined",
+  ];
+  const shouldIgnore = msg => IGNORE_ERRORS.some(e => String(msg).includes(e));
+
+  process.on("unhandledRejection", (reason) => {
+    const msg = String(reason?.message || reason || "");
+    if (shouldIgnore(msg)) return; // network error — ignore
+    log.warn(`⚠️ Unhandled Rejection: ${msg.slice(0, 150)}`);
+    saveCrashLog("rejection", reason);
+    // bot বন্ধ করা যাবে না — শুধু log
   });
-  process.on("uncaughtException", e => {
-    log.error(`অপ্রত্যাশিত ত্রুটি ধরা পড়েছে (exception):`);
-    log.error(e.message);
+
+  process.on("uncaughtException", (e) => {
+    const msg = String(e?.message || e || "");
+    if (shouldIgnore(msg)) return;
+    log.warn(`⚠️ UncaughtException: ${msg.slice(0, 150)}`);
     saveCrashLog("exception", e);
+    // Critical error হলেও চেষ্টা করো চালু রাখতে
+    if (msg.includes("FATAL") || msg.includes("out of memory")) {
+      log.error("💀 Fatal error — restarting in 3s...");
+      setTimeout(() => process.exit(1), 3000);
+    }
   });
+
+  // Memory monitor — 3.5GB এর বেশি হলে warn
+  setInterval(() => {
+    const mb = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+    if (mb > 3500) {
+      log.warn(`⚠️ Memory high: ${mb}MB — cleaning up...`);
+      // tmp folder clean
+      try {
+        const tmpDir = require("path").join(ROOT, "tmp");
+        require("fs-extra").emptyDirSync(tmpDir);
+      } catch {}
+      // Force GC if available
+      if (global.gc) global.gc();
+    }
+  }, 5 * 60 * 1000); // 5 মিনিটে একবার
+
+  // tmp folder auto-clean every 30 min
+  setInterval(() => {
+    try {
+      const tmpDir  = require("path").join(ROOT, "tmp");
+      const files   = require("fs").readdirSync(tmpDir);
+      const now     = Date.now();
+      let cleaned   = 0;
+      for (const f of files) {
+        const fp   = require("path").join(tmpDir, f);
+        const stat = require("fs").statSync(fp);
+        if (now - stat.mtimeMs > 10 * 60 * 1000) { // 10 মিনিটের পুরনো
+          require("fs").unlinkSync(fp);
+          cleaned++;
+        }
+      }
+      if (cleaned) log.info(`🧹 tmp cleanup: ${cleaned} files removed`);
+    } catch {}
+  }, 30 * 60 * 1000);
 
   printBanner();
 
