@@ -477,7 +477,11 @@ function loadCommands() {
 
   const disabled = new Set(global.config.commandDisabled || []);
   const files    = fs.readdirSync(dir).filter(
-    f => f.endsWith(".js") && !f.startsWith("_") && !disabled.has(f.replace(".js",""))
+    f => f.endsWith(".js")
+      && !f.startsWith("_")
+      && f !== "index.js"          // index.js skip
+      && f !== "apiHelper.js"      // apiHelper skip
+      && !disabled.has(f.replace(".js",""))
   );
 
   // ── apiHelper সব possible path এ register করো ──
